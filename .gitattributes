@@ -1,0 +1,5 @@
+# Exclude unused starter implementations from language statistics
+c#/** linguist-detectable=false
+kotlin/** linguist-detectable=false
+python/** linguist-detectable=false
+typescript/** linguist-detectable=false
