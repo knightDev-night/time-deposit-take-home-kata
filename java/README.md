@@ -10,7 +10,9 @@ mvn -f java/pom.xml clean verify
 java -jar java/target/time-deposit-kata-1.0-SNAPSHOT.jar
 ```
 
-The application starts on port `8080` by default and runs Flyway migrations at startup. The Compose database binds to `127.0.0.1:5432` and persists its data in a named volume. Set `TIME_DEPOSIT_DB_PORT` before starting Compose and the application to use a different host port. The checked-in database name and user `time_deposit` and password `time_deposit_dev` are for local development. For another environment, set `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD`.
+The application binds to `127.0.0.1:8080` by default and runs Flyway migrations at startup. The API is unauthenticated for local assessment use. `SERVER_ADDRESS` can override the bind address. A network deployment requires its own authentication, authorization, and TLS configuration.
+
+The Compose database binds to `127.0.0.1:5432` and persists its data in a named volume. Set `TIME_DEPOSIT_DB_PORT` before starting Compose and the application to use a different host port. The checked-in database name and user `time_deposit` and password `time_deposit_dev` are for local development. For another environment, set `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, and `SPRING_DATASOURCE_PASSWORD`.
 
 To stop the local database and keep its data, run `docker compose -f java/compose.yaml stop`.
 
