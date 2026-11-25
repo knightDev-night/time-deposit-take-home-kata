@@ -1,0 +1,207 @@
+package org.ikigaidigital.infrastructure.http;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.ikigaidigital.TimeDepositApplication;
+import org.ikigaidigital.application.TimeDepositService;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+@Testcontainers
+class TimeDepositApiTest {
+    @Container
+    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17.12");
+
+    private static final HttpClient HTTP = HttpClient.newHttpClient();
+    private static ServletWebServerApplicationContext application;
+    private static URI baseUrl;
+    private static JdbcTemplate jdbc;
+    private static ObjectReader json;
+
+    @BeforeAll
+    static void startApplication() {
+        application = (ServletWebServerApplicationContext) new SpringApplicationBuilder(TimeDepositApplication.class)
+                .run("--server.port=0", "--server.address=127.0.0.1",
+                        "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
+                        "--spring.datasource.username=" + POSTGRES.getUsername(),
+                        "--spring.datasource.password=" + POSTGRES.getPassword());
+        baseUrl = URI.create("http://127.0.0.1:" + application.getWebServer().getPort());
+        jdbc = application.getBean(JdbcTemplate.class);
+        json = application.getBean(ObjectMapper.class).reader().with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+    }
+
+    @AfterAll
+    static void stopApplication() {
+        if (application != null) {
+            application.close();
+        }
+    }
+
+    @BeforeEach
+    void clearDatabase() {
+        jdbc.execute("TRUNCATE TABLE withdrawals, time_deposits");
+    }
+
+    @Test
+    void listsAndUpdatesAnEmptyDatabase() throws IOException, InterruptedException {
+        JsonNode emptyArray = json.readTree("[]");
+        assertThat(getDeposits()).isEqualTo(emptyArray);
+        applyInterest();
+        assertThat(getDeposits()).isEqualTo(emptyArray);
+    }
+
+    @Test
+    void returnsTheFullDepositAndWithdrawalContractWithExactDecimalsAndIsoDates()
+            throws IOException, InterruptedException {
+        insertDeposit(3, "premium", 46, "100.001");
+        insertDeposit(2, "student", 365, "12345678901234567890.123456789012");
+        insertDeposit(1, "basic", 31, "10.00");
+        insertWithdrawal(30, 3, "3.101", "2026-11-01");
+        insertWithdrawal(20, 2, "0.012345678901234567891", "2024-02-29");
+        insertWithdrawal(10, 3, "12.50", "2026-11-12");
+
+        assertThat(getDeposits()).isEqualTo(json.readTree("""
+                [
+                  {"id":1,"planType":"basic","balance":10.00,"days":31,"withdrawals":[]},
+                  {"id":2,"planType":"student","balance":12345678901234567890.123456789012,"days":365,
+                   "withdrawals":[{"id":20,"amount":0.012345678901234567891,"date":"2024-02-29"}]},
+                  {"id":3,"planType":"premium","balance":100.001,"days":46,
+                   "withdrawals":[{"id":10,"amount":12.50,"date":"2026-11-12"},
+                                  {"id":30,"amount":3.101,"date":"2026-11-01"}]}
+                ]
+                """));
+    }
+
+    @Test
+    void updatesOnlyEligibleBalancesAndReturnsThePersistedValuesOnGet() throws IOException, InterruptedException {
+        insertDeposit(1, "basic", 30, "1200.125");
+        insertDeposit(2, "basic", 31, "2400.123456789012");
+        insertDeposit(3, "student", 365, "6.00");
+        insertDeposit(4, "student", 366, "1800.125");
+        insertDeposit(5, "premium", 45, "600.00");
+        insertDeposit(6, "premium", 46, "4800.000000000123");
+        insertWithdrawal(1, 2, "200.00", "2026-11-12");
+        insertWithdrawal(2, 6, "250.125", "2026-11-13");
+        JsonNode expected = getDeposits();
+
+        applyInterest();
+
+        assertThat(storedBalances()).containsExactly(new BigDecimal("1200.125"), new BigDecimal("2402.123456789012"),
+                new BigDecimal("6.01"), new BigDecimal("1800.125"), new BigDecimal("600.00"),
+                new BigDecimal("4820.000000000123"));
+        ((ObjectNode) expected.get(1)).put("balance", new BigDecimal("2402.123456789012"));
+        ((ObjectNode) expected.get(2)).put("balance", new BigDecimal("6.01"));
+        ((ObjectNode) expected.get(5)).put("balance", new BigDecimal("4820.000000000123"));
+        assertThat(getDeposits()).isEqualTo(expected);
+    }
+
+    @Test
+    void eachSuccessfulPostAppliesInterestToTheLatestBalance() throws IOException, InterruptedException {
+        insertDeposit(1, "premium", 46, "4800.00");
+
+        applyInterest();
+        assertThat(storedBalances()).containsExactly(new BigDecimal("4820.00"));
+
+        applyInterest();
+        assertThat(storedBalances()).containsExactly(new BigDecimal("4840.08"));
+    }
+
+    @Test
+    void rollsBackAnEarlierBalanceWriteWhenTheNextWriteFails() {
+        insertDeposit(1, "basic", 31, "1200.00");
+        insertDeposit(2, "premium", 46, "4800.00");
+        jdbc.execute("""
+                CREATE FUNCTION reject_second_interest_update() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF (SELECT balance FROM time_deposits WHERE id = 1) = 1201.00 THEN
+                        RAISE EXCEPTION 'Rejected after the earlier balance was written' USING ERRCODE = '23514';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$
+                """);
+        jdbc.execute("""
+                CREATE TRIGGER reject_second_interest_update BEFORE UPDATE OF balance ON time_deposits
+                FOR EACH ROW WHEN (OLD.id = 2) EXECUTE FUNCTION reject_second_interest_update()
+                """);
+
+        try {
+            assertThatThrownBy(application.getBean(TimeDepositService.class)::applyMonthlyInterest)
+                    .isInstanceOf(DataIntegrityViolationException.class)
+                    .hasMessageContaining("Rejected after the earlier balance was written");
+            assertThat(storedBalances()).containsExactly(new BigDecimal("1200.00"), new BigDecimal("4800.00"));
+        } finally {
+            jdbc.execute("DROP TRIGGER reject_second_interest_update ON time_deposits");
+            jdbc.execute("DROP FUNCTION reject_second_interest_update()");
+        }
+    }
+
+    @Test
+    void rejectsABalanceOutsideTheLegacyDoubleRangeWithoutPersistingOtherCredits() {
+        insertDeposit(1, "basic", 31, "1200.00");
+        insertDeposit(2, "student", 365, "1e309");
+        List<BigDecimal> before = storedBalances();
+
+        assertThatThrownBy(application.getBean(TimeDepositService.class)::applyMonthlyInterest)
+                .isInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("outside the legacy interest range for deposit 2");
+        assertThat(storedBalances()).isEqualTo(before);
+    }
+
+    private JsonNode getDeposits() throws IOException, InterruptedException {
+        var request = HttpRequest.newBuilder(baseUrl.resolve("/time-deposits"))
+                .timeout(Duration.ofSeconds(10)).GET().build();
+        var response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type"))
+                .hasValueSatisfying(contentType -> assertThat(contentType).startsWith("application/json"));
+        return json.readTree(response.body());
+    }
+
+    private void applyInterest() throws IOException, InterruptedException {
+        var request = HttpRequest.newBuilder(baseUrl.resolve("/time-deposits/interest"))
+                .timeout(Duration.ofSeconds(10)).POST(HttpRequest.BodyPublishers.noBody()).build();
+        var response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(204);
+        assertThat(response.body()).isEmpty();
+    }
+
+    private void insertDeposit(int id, String planType, int days, String balance) {
+        jdbc.update("INSERT INTO time_deposits (id, plan_type, days, balance) VALUES (?, ?, ?, ?)",
+                id, planType, days, new BigDecimal(balance));
+    }
+
+    private void insertWithdrawal(int id, int depositId, String amount, String date) {
+        jdbc.update("INSERT INTO withdrawals (id, time_deposit_id, amount, date) VALUES (?, ?, ?, ?)",
+                id, depositId, new BigDecimal(amount), LocalDate.parse(date));
+    }
+
+    private List<BigDecimal> storedBalances() {
+        return jdbc.queryForList("SELECT balance FROM time_deposits ORDER BY id", BigDecimal.class);
+    }
+}
