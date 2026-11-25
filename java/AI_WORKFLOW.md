@@ -4,11 +4,22 @@ This record uses the development conversation, [AGENTS.md](../AGENTS.md), local 
 
 ## Tools and configuration
 
-- The candidate reports using ChatGPT for planning, technical discussion, preparing prompts, and reviewing reported results.
+- The candidate used ChatGPT to discuss requirements, get architecture recommendations, prepare the eight development phase prompts, and review Codex's phase reports.
 - The OpenAI Codex VS Code extension worked in the local repository. Codex inspected the source and history, implemented the phased changes, ran tests, diagnosed failures, and reported results.
 - The verified local tools were Eclipse Adoptium JDK 17.0.21.1, Maven 3.9.16, Git, Windows PowerShell, Docker Engine 29.9.3, and Docker Compose 5.7.1. Outside the Maven build, JShell checked legacy arithmetic, curl exercised HTTP, Python compared JSON decimals in smoke checks, and Redocly CLI validated the static OpenAPI file.
-- The session used a workspace-write sandbox and the checked-in `AGENTS.md` instructions. When the sandbox could not start a shell process, Codex requested escalation for specific commands, including repository inspection and verification with Maven or Docker. The broader approval policy settings are unverified.
-- The exact model identifier, reasoning effort setting, VS Code extension version, and any private ChatGPT configuration could not be verified.
+
+The candidate confirmed that they manually configured Codex with these settings before Phase 1.
+
+```ini
+model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[windows]
+sandbox = "elevated"
+```
+
+The session environment independently confirmed `workspace-write` sandboxing. Codex followed the checked-in `AGENTS.md` instructions, and the command records show escalation requests for specific commands when the sandbox could not start a shell process. The effective reasoning effort, approval policy, and Windows sandbox mode were not independently verified at runtime. The exact model identifier, VS Code extension version, and private ChatGPT configuration remain unverified.
 
 ## Development phases
 
