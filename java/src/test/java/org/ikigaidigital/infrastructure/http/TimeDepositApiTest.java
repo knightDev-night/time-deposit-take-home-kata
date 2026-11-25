@@ -19,6 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.URI;
@@ -27,7 +28,13 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -132,6 +139,47 @@ class TimeDepositApiTest {
     }
 
     @Test
+    void overlappingPostsEachApplyInterestToTheLatestCommittedBalance() throws Exception {
+        int depositId = 1;
+        insertDeposit(depositId, "premium", 46, "1200.125");
+        insertWithdrawal(10, depositId, "25.125", "2026-11-12");
+        var dataSource = application.getBean(DataSource.class);
+        var requests = new ArrayList<CompletableFuture<HttpResponse<String>>>(2);
+
+        try (var gate = dataSource.getConnection()) {
+            gate.setAutoCommit(false);
+            try {
+                try (var lock = gate.prepareStatement("SELECT id FROM time_deposits WHERE id = ? FOR UPDATE")) {
+                    lock.setInt(1, depositId);
+                    lock.setQueryTimeout(5);
+                    try (var row = lock.executeQuery()) {
+                        assertThat(row.next()).isTrue();
+                    }
+                }
+
+                requests.add(HTTP.sendAsync(interestRequest(), HttpResponse.BodyHandlers.ofString()));
+                requests.add(HTTP.sendAsync(interestRequest(), HttpResponse.BodyHandlers.ofString()));
+                awaitBothInterestQueriesWaitingOnLocks(dataSource);
+            } finally {
+                gate.rollback();
+            }
+
+            for (var request : requests) {
+                assertNoContent(request.get(10, TimeUnit.SECONDS));
+            }
+        } finally {
+            requests.forEach(request -> request.cancel(true));
+        }
+
+        // 1200.125 earns 5.00 at 5% / 12. The new principal of 1205.125 earns 5.02.
+        assertThat(storedBalances()).containsExactly(new BigDecimal("1210.145"));
+        assertThat(getDeposits()).isEqualTo(json.readTree("""
+                [{"id":1,"planType":"premium","balance":1210.145,"days":46,
+                  "withdrawals":[{"id":10,"amount":25.125,"date":"2026-11-12"}]}]
+                """));
+    }
+
+    @Test
     void rollsBackAnEarlierBalanceWriteWhenTheNextWriteFails() {
         insertDeposit(1, "basic", 31, "1200.00");
         insertDeposit(2, "premium", 46, "4800.00");
@@ -183,11 +231,50 @@ class TimeDepositApiTest {
         return json.readTree(response.body());
     }
 
+    private static void awaitBothInterestQueriesWaitingOnLocks(DataSource dataSource)
+            throws InterruptedException, ExecutionException {
+        var observer = new JdbcTemplate(dataSource);
+        observer.setQueryTimeout(3);
+        var bothWaiting = new CompletableFuture<Void>();
+        var poller = Executors.newSingleThreadScheduledExecutor();
+        try {
+            poller.scheduleWithFixedDelay(() -> {
+                try {
+                    Integer blockedQueries = observer.queryForObject("""
+                            SELECT count(*) FROM pg_stat_activity
+                            WHERE datname = current_database()
+                              AND pid <> pg_backend_pid()
+                              AND state = 'active'
+                              AND wait_event_type = 'Lock'
+                              AND query LIKE '%FROM time_deposits%'
+                              AND query LIKE '%FOR UPDATE%'
+                            """, Integer.class);
+                    if (Integer.valueOf(2).equals(blockedQueries)) {
+                        bothWaiting.complete(null);
+                    }
+                } catch (RuntimeException failure) {
+                    bothWaiting.completeExceptionally(failure);
+                }
+            }, 0, 25, TimeUnit.MILLISECONDS);
+            bothWaiting.get(10, TimeUnit.SECONDS);
+        } catch (TimeoutException timeout) {
+            throw new AssertionError("Expected both POST transactions to wait on PostgreSQL locks", timeout);
+        } finally {
+            poller.shutdownNow();
+        }
+    }
+
+    private static HttpRequest interestRequest() {
+        return HttpRequest.newBuilder(baseUrl.resolve("/time-deposits/interest"))
+                .timeout(Duration.ofSeconds(20)).POST(HttpRequest.BodyPublishers.noBody()).build();
+    }
+
     private void applyInterest() throws IOException, InterruptedException {
-        var request = HttpRequest.newBuilder(baseUrl.resolve("/time-deposits/interest"))
-                .timeout(Duration.ofSeconds(10)).POST(HttpRequest.BodyPublishers.noBody()).build();
-        var response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-        assertThat(response.statusCode()).isEqualTo(204);
+        assertNoContent(HTTP.send(interestRequest(), HttpResponse.BodyHandlers.ofString()));
+    }
+
+    private static void assertNoContent(HttpResponse<String> response) {
+        assertThat(response.statusCode()).as("POST status with body %s", response.body()).isEqualTo(204);
         assertThat(response.body()).isEmpty();
     }
 
