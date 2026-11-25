@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: XA Bank Time Deposit API
+  version: '1.0.0'
+servers:
+  - url: http://localhost:8080
+    description: Local application
+paths:
+  /time-deposits:
+    get:
+      operationId: listTimeDeposits
+      summary: List all time deposits
+      description: Returns deposits and their withdrawals in ID order. An empty database returns an empty array.
+      responses:
+        '200':
+          description: All time deposits
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TimeDeposit'
+              examples:
+                populated:
+                  summary: Deposits with and without withdrawals
+                  value:
+                    - id: 102
+                      planType: basic
+                      balance: 2400.00
+                      days: 31
+                      withdrawals:
+                        - id: 201
+                          amount: 20.00
+                          date: '2026-11-01'
+                    - id: 103
+                      planType: student
+                      balance: 6.00
+                      days: 365
+                      withdrawals: []
+                empty:
+                  summary: Empty database
+                  value: []
+  /time-deposits/interest:
+    post:
+      operationId: applyMonthlyInterest
+      summary: Apply one month of interest to all time deposits
+      description: >-
+        Applies interest in one transaction. Each successful request applies another month's interest
+        to the current balances, so the operation is non-idempotent. An empty database also succeeds.
+      responses:
+        '204':
+          description: Interest applied successfully. The response body is empty.
+components:
+  schemas:
+    TimeDeposit:
+      type: object
+      additionalProperties: false
+      required: [id, planType, balance, days, withdrawals]
+      properties:
+        id:
+          type: integer
+          format: int32
+        planType:
+          type: string
+        balance:
+          type: number
+          description: Stored principal including any applied interest.
+        days:
+          type: integer
+          format: int32
+        withdrawals:
+          type: array
+          description: Empty when the deposit has no withdrawals. The enclosing deposit identifies the parent.
+          items:
+            $ref: '#/components/schemas/Withdrawal'
+    Withdrawal:
+      type: object
+      additionalProperties: false
+      required: [id, amount, date]
+      properties:
+        id:
+          type: integer
+          format: int32
+        amount:
+          type: number
+        date:
+          type: string
+          format: date
+          description: ISO 8601 calendar date in YYYY-MM-DD format.
