@@ -1,5 +1,8 @@
 # Exclude unused starter implementations from language statistics
-c#/** linguist-detectable=false
+"c#/**" linguist-detectable=false
 kotlin/** linguist-detectable=false
 python/** linguist-detectable=false
 typescript/** linguist-detectable=false
+
+# Include Java source files
+java/**/*.java linguist-detectable=true
