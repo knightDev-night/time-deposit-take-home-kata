@@ -71,6 +71,12 @@ Codex reread the Java changes against the original baseline. The shipped app had
 
 Codex prepared the final Java README and this workflow record, repeated the build and OpenAPI validation, and checked the public fork's metadata without publishing changes. `clean verify` passed **52 tests**, with **93/95 lines and 24/24 branches** covered. The phase stops at the documentation diff for candidate approval.
 
+### 9. Source documentation
+
+> Perform a final documentation-only enhancement of the Java Time Deposit Kata.
+
+Codex used the attached brief and `AGENTS.md` to document Java contracts, legacy rounding, persistence and transaction behavior, and the purpose of each test. It added comments to the sample SQL and Java configuration and described the applied migration in the Java README to preserve its Flyway checksum. Verification with `mvn -f java/pom.xml clean verify` on Java 17 passed all 52 existing tests.
+
 ## Important decisions
 
 - The candidate selected Spring Boot and PostgreSQL after the initial HttpServer and H2 proposal. Boot supplied the HTTP and transaction wiring. PostgreSQL supplied decimal storage and row locking, and the same engine could be tested through Testcontainers.

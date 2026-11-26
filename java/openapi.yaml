@@ -1,3 +1,4 @@
+# Static contract for the two application operations. Import it into an OpenAPI client for local use.
 openapi: 3.0.3
 info:
   title: XA Bank Time Deposit API
@@ -62,6 +63,7 @@ components:
           format: int32
         planType:
           type: string
+        # Monetary values can carry fractional cents. Keep the numeric format open to decimal clients.
         balance:
           type: number
           description: Stored principal including any applied interest.

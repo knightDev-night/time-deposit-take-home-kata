@@ -146,6 +146,8 @@ The [Flyway migration](src/main/resources/db/migration/V1__create_time_deposit_t
 
 The remaining fields are required. Monetary amounts use PostgreSQL `NUMERIC` without a fixed scale and Java `BigDecimal`. Withdrawal dates use `DATE` and Java `LocalDate`. One ordered join returns deposits and withdrawals by ID, including deposits with empty withdrawal collections.
 
+Unconstrained `NUMERIC` lets the schema retain fractional cents in the original principal. The withdrawal index supports lookups by deposit ID because the foreign key does not create an index on the referencing column. Flyway validates the checksum of the applied migration, including SQL comments, so keep design notes here and use a new migration for schema changes.
+
 ## Assumptions and trade-offs
 
 - **Rates and eligibility.** The original calculator establishes the annual-rate interpretation and the inclusive 365-day Student cutoff. The API uses the stored day count. The stored balance is the interest principal, and withdrawal records are informational for this calculation.

@@ -5,10 +5,13 @@ services:
       POSTGRES_DB: time_deposit
       POSTGRES_USER: time_deposit
       POSTGRES_PASSWORD: time_deposit_dev
+    # Publish only to loopback. The application uses the same host port override.
     ports:
       - "127.0.0.1:${TIME_DEPOSIT_DB_PORT:-5432}:5432"
+    # Keep the database between restarts. Flyway applies the schema when the app starts.
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Check TCP readiness. Compose passes the escaped variables to the container shell.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 2s

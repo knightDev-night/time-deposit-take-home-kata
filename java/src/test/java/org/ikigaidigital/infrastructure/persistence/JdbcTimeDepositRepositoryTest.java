@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/** Exercises the migrated PostgreSQL schema and JDBC adapter through the repository port. */
 @Testcontainers
 class JdbcTimeDepositRepositoryTest {
     @Container
@@ -47,6 +48,7 @@ class JdbcTimeDepositRepositoryTest {
     private static TimeDepositRepository repository;
     private static TransactionTemplate transaction;
 
+    /** Boots a non-web context so the real Flyway migration and transactional repository proxy are exercised. */
     @BeforeAll
     static void startApplication() {
         application = new SpringApplicationBuilder(TimeDepositApplication.class)
@@ -59,6 +61,7 @@ class JdbcTimeDepositRepositoryTest {
         transaction = new TransactionTemplate(application.getBean(PlatformTransactionManager.class));
     }
 
+    /** Releases the Spring context and its connection pool after the repository tests. */
     @AfterAll
     static void stopApplication() {
         if (application != null) {
@@ -66,16 +69,23 @@ class JdbcTimeDepositRepositoryTest {
         }
     }
 
+    /** Isolates each fixture while keeping the migrated schema in place. */
     @BeforeEach
     void clearDatabase() {
         jdbc.execute("TRUNCATE TABLE withdrawals, time_deposits");
     }
 
+    /** An empty database yields an empty collection that the application can list directly. */
     @Test
     void returnsAnEmptyListWhenNoDepositsExist() {
         assertThat(repository.findAll()).isEmpty();
     }
 
+    /**
+     * Interleaves deposit and withdrawal inserts to verify grouping by parent and ordering
+     * by ID. The result must retain the deposit without withdrawals, precise decimals,
+     * and the leap-day date.
+     */
     @Test
     void returnsEachDepositWithItsOwnWithdrawalsInIdOrderAndPreservesDecimalsAndDates() {
         var basic = new StoredDeposit(1, "basic", 31, new BigDecimal("10.00"));
@@ -97,6 +107,14 @@ class JdbcTimeDepositRepositoryTest {
                 new DepositWithWithdrawals(premium, List.of(firstPremiumWithdrawal, secondPremiumWithdrawal)));
     }
 
+    /**
+     * Starts with valid rows and attempts one constraint violation per case. Exact
+     * PostgreSQL SQL states distinguish duplicate IDs, required columns, and orphaned
+     * withdrawals from unrelated SQL failures.
+     *
+     * @param sql update that violates one migrated constraint
+     * @param sqlState expected PostgreSQL error code for that constraint
+     */
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
             UPDATE time_deposits SET id = 1 WHERE id = 2           | 23505
@@ -121,6 +139,10 @@ class JdbcTimeDepositRepositoryTest {
                 .isInstanceOfSatisfying(SQLException.class, cause -> assertThat(cause.getSQLState()).isEqualTo(sqlState));
     }
 
+    /**
+     * Locks three deposits, updates two, and verifies committed values at their supplied
+     * precision. The omitted balance and the existing withdrawal must both be retained.
+     */
     @Test
     void commitsOnlyTheSuppliedBalancesInOneBatchAndPreservesTheirPrecision() {
         var basic = new StoredDeposit(1, "basic", 31, new BigDecimal("10.00"));
@@ -145,6 +167,10 @@ class JdbcTimeDepositRepositoryTest {
                 new DepositWithWithdrawals(student, List.of()));
     }
 
+    /**
+     * Reads the new balance inside the transaction, then marks the transaction rollback-only.
+     * A fresh read must find the original balance, detecting a write that committed independently.
+     */
     @Test
     void rollsBackBalanceChangesWithTheCallersTransaction() {
         var deposit = new StoredDeposit(1, "basic", 31, new BigDecimal("10.00"));
@@ -161,6 +187,7 @@ class JdbcTimeDepositRepositoryTest {
         assertThat(repository.findAll()).containsExactly(new DepositWithWithdrawals(deposit, List.of()));
     }
 
+    /** Both update operations reject calls without a transaction, keeping the lock and write coupled. */
     @Test
     void requiresAnExistingTransactionForBothBalanceUpdateOperations() {
         assertThatThrownBy(repository::findAllForBalanceUpdate).isInstanceOf(IllegalTransactionStateException.class);
@@ -168,6 +195,11 @@ class JdbcTimeDepositRepositoryTest {
                 .isInstanceOf(IllegalTransactionStateException.class);
     }
 
+    /**
+     * Holds the row lock in one transaction and requires a competing transaction to
+     * fail with PostgreSQL's lock timeout. After the holder commits its update, a fresh
+     * locking read must see the new balance.
+     */
     @Test
     void blocksACompetingLockUntilCommitThenExposesTheNewBalance() {
         var deposit = new StoredDeposit(1, "basic", 31, new BigDecimal("10.00"));
@@ -178,6 +210,7 @@ class JdbcTimeDepositRepositoryTest {
         try {
             transaction.executeWithoutResult(status -> {
                 repository.findAllForBalanceUpdate();
+                // A separate thread opens a separate transaction while the first still holds the lock.
                 Future<?> blockedRead = competitor.submit(() -> transaction.executeWithoutResult(other -> {
                     jdbc.execute("SET LOCAL lock_timeout = '500ms'");
                     repository.findAllForBalanceUpdate();
@@ -198,11 +231,13 @@ class JdbcTimeDepositRepositoryTest {
         }
     }
 
+    /** Seeds a stored deposit directly so the fixture is independent of repository queries and writes. */
     private void insertDeposit(StoredDeposit deposit) {
         jdbc.update("INSERT INTO time_deposits (id, plan_type, days, balance) VALUES (?, ?, ?, ?)",
                 deposit.id(), deposit.planType(), deposit.days(), deposit.balance());
     }
 
+    /** Seeds a withdrawal under the specified parent so the read can verify the association. */
     private void insertWithdrawal(int depositId, Withdrawal withdrawal) {
         jdbc.update("INSERT INTO withdrawals (id, time_deposit_id, amount, date) VALUES (?, ?, ?, ?)",
                 withdrawal.id(), depositId, withdrawal.amount(), withdrawal.date());
